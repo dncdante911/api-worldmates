@@ -1,16 +1,38 @@
 <?php
-// +------------------------------------------------------------------------+
-// | @author Deen Doughouz (DoughouzForest)
-// | @author_url 1: http://www.wowonder.com
-// | @author_url 2: http://codecanyon.net/user/doughouzforest
-// | @author_email: wowondersocial@gmail.com   
-// +------------------------------------------------------------------------+
-// | WoWonder - The Ultimate Social Networking Platform
-// | Copyright (c) 2018 WoWonder. All rights reserved.
-// +------------------------------------------------------------------------+
+
 $response_data = array(
     'api_status' => 400
 );
+
+if (!isset($_GET['access_token'])) {
+    $error_code    = 1;
+    $error_message = 'access_token (GET) is missing';
+}
+
+if (empty($error_code)) {
+    $wo_user = Wo_UserData($_GET['access_token']);
+    if (empty($wo_user)) {
+        $error_code    = 2;
+        $error_message = 'Invalid access_token';
+    } else {
+        // ВИПРАВЛЕНО: Правильно мапимо поля з user_id -> id
+        $wo['loggedin'] = true;
+        $wo['user']     = array(
+            'id'       => isset($wo_user['user_id']) ? $wo_user['user_id'] : $wo_user['id'],
+            'username' => $wo_user['username'],
+            'email'    => isset($wo_user['email']) ? $wo_user['email'] : '',
+            'name'     => isset($wo_user['name']) ? $wo_user['name'] : $wo_user['username'],
+            'avatar'   => isset($wo_user['avatar']) ? $wo_user['avatar'] : ''
+        );
+
+        // Зберігаємо оригінальні дані також
+        foreach ($wo_user as $key => $value) {
+            if (!isset($wo['user'][$key])) {
+                $wo['user'][$key] = $value;
+            }
+        }
+    }
+}
 
 $required_fields =  array(
                         'create',
@@ -30,6 +52,16 @@ $required_fields =  array(
                         'join',
                         'destruct_at',
                     );
+                    
+$log_file = '/var/www/www-root/data/www/worldmates.club/api/v2/logs/group_chat_debug.log';
+
+// Функція для логування
+function log_debug($message, $log_file) {
+    $timestamp = date('Y-m-d H:i:s');
+    $log_entry = "[$timestamp] $message\n";
+    @file_put_contents($log_file, $log_entry, FILE_APPEND);
+}
+
 if (!empty($_POST['type']) && in_array($_POST['type'], $required_fields)) {
     if ($_POST['type'] == 'join') {
         if (empty($_POST['id']) || !is_numeric($_POST['id']) || $_POST['id'] < 1) {
@@ -107,225 +139,226 @@ if (!empty($_POST['type']) && in_array($_POST['type'], $required_fields)) {
 
 
     }
-    if ($_POST['type'] == 'create') {
+    
+if ($_POST['type'] == 'create') {
+    log_debug("=== CREATE GROUP CHAT REQUEST STARTED ===", $log_file);
+    log_debug("POST data: " . json_encode($_POST), $log_file);
 
-        $required_fields = array(
-            'group_name',
-            'parts'
-        );
+    // Логуємо частину access_token для діагностики
+    $token_preview = '';
+    if (!empty($_GET['access_token'])) {
+        $token = $_GET['access_token'];
+        $token_preview = substr($token, 0, 8) . '...' . substr($token, -8);
+    }
+    log_debug("Access token preview: $token_preview", $log_file);
 
-        foreach ($required_fields as $key => $value) {
-            if (empty($_POST[$value]) && empty($error_code)) {
-                $error_code    = 4;
-                $error_message = $value . ' (POST) is missing';
+    // ============================================================
+    // КРИТИЧНЕ ВИПРАВЛЕННЯ: Ініціалізація користувача з токену
+    // ============================================================
+
+    // Перевіряємо чи є access_token
+    if (empty($_GET['access_token'])) {
+        log_debug("ERROR: access_token is missing", $log_file);
+        $error_code    = 401;
+        $error_message = 'access_token (GET) is missing';
+    }
+
+    // Якщо токен є, ініціалізуємо користувача
+    if (empty($error_code) && !empty($_GET['access_token'])) {
+        log_debug("Initializing user from access_token...", $log_file);
+
+        // Отримуємо дані користувача з токену
+        $wo_user = Wo_UserData($_GET['access_token']);
+
+        log_debug("Wo_UserData returned: " . json_encode($wo_user), $log_file);
+
+        if (empty($wo_user) || empty($wo_user['user_id'])) {
+            log_debug("ERROR: Invalid access_token - no user data", $log_file);
+            $error_code    = 401;
+            $error_message = 'Invalid access_token';
+        } else {
+            // Ініціалізуємо глобальний $wo масив
+            $wo['loggedin'] = true;
+            $wo['user']     = array(
+                'id'       => $wo_user['user_id'],
+                'username' => $wo_user['username'],
+                'email'    => $wo_user['email'],
+                'name'     => $wo_user['name'],
+                'avatar'   => $wo_user['avatar']
+            );
+
+            log_debug("User initialized successfully: ID={$wo['user']['id']}, username={$wo['user']['username']}", $log_file);
+        }
+    }
+
+    // Перевіряємо чи користувач авторизований після ініціалізації
+    if (empty($error_code) && empty($wo['user']['id'])) {
+        log_debug("CRITICAL ERROR: User not authenticated after initialization!", $log_file);
+        log_debug("Available \$wo keys: " . json_encode(array_keys($wo)), $log_file);
+
+        $error_code    = 401;
+        $error_message = 'User not authenticated. Please check access_token.';
+        log_debug("=== REQUEST ABORTED: Not authenticated ===\n", $log_file);
+
+        // Повертаємо помилку авторизації
+        header('Content-Type: application/json');
+        echo json_encode(array(
+            'api_status' => 401,
+            'error_code' => 401,
+            'error_message' => $error_message
+        ));
+        exit();
+    }
+
+    $user_id = $wo['user']['id'];
+    log_debug("User ID: $user_id", $log_file);
+
+    // ============================================================
+    // ДАЛІ ЙДЕ СТАНДАРТНА ЛОГІКА СТВОРЕННЯ ГРУПИ
+    // ============================================================
+
+    $required_fields = array(
+        'group_name',
+        'parts'
+    );
+
+    // Перевірка обов'язкових полів
+    foreach ($required_fields as $key => $value) {
+        if (empty($_POST[$value]) && empty($error_code)) {
+            $error_code    = 4;
+            $error_message = $value . ' (POST) is missing';
+            log_debug("ERROR: Missing field - $value", $log_file);
+        }
+    }
+
+    // Валідація довжини назви групи
+    if (empty($error_code)) {
+        $name_length = mb_strlen($_POST['group_name'], 'UTF-8');
+        log_debug("Group name length: $name_length (name: {$_POST['group_name']})", $log_file);
+
+        if ($name_length < 4 || $name_length > 25) {
+            $error_code    = 5;
+            $error_message = "group_name must be between 4 and 25 characters (current: $name_length)";
+            log_debug("ERROR: Invalid name length - $name_length", $log_file);
+        }
+    }
+
+    // Валідація аватару (якщо є)
+    if (empty($error_code) && isset($_FILES["avatar"])) {
+        log_debug("Avatar file uploaded", $log_file);
+        if (file_exists($_FILES["avatar"]["tmp_name"])) {
+            $image = getimagesize($_FILES["avatar"]["tmp_name"]);
+            if (!in_array($image[2], array(
+                IMAGETYPE_GIF,
+                IMAGETYPE_JPEG,
+                IMAGETYPE_PNG,
+                IMAGETYPE_BMP
+            ))) {
+                $error_code    = 6;
+                $error_message = 'Group avatar must be an image';
+                log_debug("ERROR: Invalid avatar image type", $log_file);
             }
         }
+    }
 
-        if (empty($error_code) && (strlen($_POST['group_name']) < 4 || strlen($_POST['group_name']) > 25)) {
-            $error_code    = 5;
-            $error_message = 'group_name must be between 4 and 25 character';
+    // Створення групи
+    if (empty($error_code)) {
+        // Обробка списку учасників
+        $parts_raw = Wo_Secure($_POST['parts']);
+        log_debug("Parts (raw): '$parts_raw'", $log_file);
+
+        // Якщо parts порожній, створюємо масив тільки з поточним користувачем
+        if (empty($parts_raw) || trim($parts_raw) == '') {
+            $users = array($user_id);
+            log_debug("Parts was empty, using only current user: $user_id", $log_file);
+        } else {
+            $users = explode(',', $parts_raw);
+            // Фільтруємо порожні елементи
+            $users = array_filter($users, function($id) {
+                return !empty(trim($id)) && is_numeric(trim($id));
+            });
+            // Додаємо поточного користувача якщо його немає
+            if (!in_array($user_id, $users)) {
+                $users[] = $user_id;
+            }
+            log_debug("Users after processing: " . json_encode($users), $log_file);
         }
 
-        if (empty($error_code) && isset($_FILES["avatar"])) {
-            if (file_exists($_FILES["avatar"]["tmp_name"])) {
-                $image = getimagesize($_FILES["avatar"]["tmp_name"]);
-                if (!in_array($image[2], array(
-                    IMAGETYPE_GIF,
-                    IMAGETYPE_JPEG,
-                    IMAGETYPE_PNG,
-                    IMAGETYPE_BMP
-                ))) {
-                    $error_code    = 6;
-                    $error_message = 'Group avatar must be an image';
+        $name = Wo_Secure($_POST['group_name']);
+        $type = 'group';
+        if (!empty($_POST['group_type'])) {
+            $type = Wo_Secure($_POST['group_type']);
+        }
+
+        log_debug("Calling Wo_CreateGChat with name='$name', type='$type', users=" . json_encode($users), $log_file);
+
+        // Створюємо групу
+        try {
+            $id = Wo_CreateGChat($name, $users, $type);
+            log_debug("Wo_CreateGChat returned: " . var_export($id, true) . " (type: " . gettype($id) . ")", $log_file);
+        } catch (Exception $e) {
+            log_debug("EXCEPTION in Wo_CreateGChat: " . $e->getMessage(), $log_file);
+            log_debug("Stack trace: " . $e->getTraceAsString(), $log_file);
+            $id = false;
+        }
+
+        if ($id && is_numeric($id)) {
+            log_debug("SUCCESS: Group created with ID: $id", $log_file);
+
+            // Обробка аватару
+            if (isset($_FILES["avatar"])) {
+                if (file_exists($_FILES["avatar"]["tmp_name"])) {
+                    $fileInfo      = array(
+                        'file' => $_FILES["avatar"]["tmp_name"],
+                        'name' => $_FILES["avatar"]["name"],
+                        'size' => $_FILES["avatar"]["size"],
+                        'type' => $_FILES["avatar"]["type"],
+                        'types' => 'jpg,png,jpeg,gif'
+                    );
+                    $media         = Wo_ShareFile($fileInfo, $id);
+                    $mediaFilename = $media['filename'];
+                    if (!empty($mediaFilename)) {
+                        $update_data = Wo_UpdateGroupChatData($id, array(
+                            'avatar' => $mediaFilename
+                        ));
+                        log_debug("Avatar uploaded: $mediaFilename", $log_file);
+                    }
                 }
             }
-        }
 
-        if (empty($error_code)) {
-            $users   = explode(',', Wo_Secure($_POST['parts']));
-            $users[] = $wo['user']['id'];
-            $name    = Wo_Secure($_POST['group_name']);
-            $type    = 'group';
-            if (!empty($_POST['group_type'])) {
-                $type    = Wo_Secure($_POST['group_type']);
-            }
-            $id      = Wo_CreateGChat($name, $users,$type);
-            
-            if (isset($_FILES["avatar"]["tmp_name"])) {
-                $fileInfo      = array(
-                    'file' => $_FILES["avatar"]["tmp_name"],
-                    'name' => $_FILES['avatar']['name'],
-                    'size' => $_FILES["avatar"]["size"],
-                    'type' => $_FILES["avatar"]["type"],
-                    'types' => 'jpg,png,bmp,gif,jpeg',
-                    'compress' => false,
-                    'crop' => array(
-                        'width' => 70,
-                        'height' => 70
-                    )
-                );
-                $media         = Wo_ShareFile($fileInfo);
-                $mediaFilename = $media['filename'];
-                @Wo_UpdateGChat($id, array(
-                    "avatar" => $mediaFilename
-                ));
-            }
-            if ($id && is_numeric($id)) {
-                $group_data = Wo_GetChatGroupData($id);
-                foreach ($group_data as $key_g => $group) {
+            // Отримуємо дані створеної групи
+            $group_data = Wo_GroupTabData($id);
+
+            if (!empty($group_data)) {
+                // Видаляємо недозволені поля
+                if (isset($non_allowed)) {
                     foreach ($non_allowed as $key => $value) {
-                        unset($group_data[$key_g]['user_data'][$value]);
-                    }
-                    foreach ($group_data[$key_g]['parts'] as $key1 => $part) {
-                        foreach ($non_allowed as $key => $value) {
-                            unset($group_data[$key_g]['parts'][$key1][$value]);
+                        unset($group_data['user_data'][$value]);
+                        foreach ($group_data['parts'] as $key2 => $user) {
+                            unset($group_data['parts'][$key2][$value]);
                         }
                     }
                 }
+
                 $response_data = array(
                     'api_status' => 200,
                     'data' => $group_data
                 );
+                log_debug("SUCCESS: Returning group data", $log_file);
+            } else {
+                $error_code    = 7;
+                $error_message = 'Failed to fetch created group data';
+                log_debug("ERROR: Group created but failed to fetch data", $log_file);
             }
-        }
-    }
-
-    if ($_POST['type'] == 'delete') {
-        if (empty($_POST['id']) || !is_numeric($_POST['id']) || $_POST['id'] < 1) {
-            $error_code    = 7;
-            $error_message = 'id must be numeric and greater than 0';
-        }
-
-        if (empty($error_code)) {
-            $result = Wo_DeleteGChat($_POST['id']);
-            if ($result === true) {
-                $response_data = array(
-                    'api_status' => 200,
-                    'message_data' => 'group successfully deleted'
-                );
-            }
-            else{
-                $error_code    = 8;
-                $error_message = 'group not found or removed';
-            }
-        }
-    }
-
-    if ($_POST['type'] == 'destruct_at') {
-        if (empty($_POST['id']) || !is_numeric($_POST['id']) || $_POST['id'] < 1) {
-            $error_code    = 7;
-            $error_message = 'id must be numeric and greater than 0';
-        }
-
-        
-        if (!empty($_POST['destruct_at']) && !is_numeric($_POST['destruct_at'])) {
+        } else {
             $error_code    = 8;
-            $error_message = 'destruct_at must be numeric';
-        }
-
-        if (empty($error_code)) {
-            $destruct_at = 0;
-            if (!empty($_POST['destruct_at'])) {
-                $destruct_at = Wo_Secure($_POST['destruct_at']);
-            }
-            $group_id = Wo_Secure($_POST['id']);
-            $group_tab = Wo_GroupTabData($group_id);
-            if ($group_tab && is_array($group_tab) && $group_tab['type'] == 'secret' && Wo_IsGChatMemeberExists($group_id, $wo['user']['id'])) {
-                $db->where('group_id',$group_id)->update(T_GROUP_CHAT,[
-                    'destruct_at' => $destruct_at
-                ]);
-
-                $response_data = array(
-                    'api_status' => 200,
-                    'message' => 'chat updated successfully'
-                );
-            }
-            else{
-                $error_code    = 8;
-                $error_message = 'chat not found or not secret';
-            }
+            $error_message = 'Failed to create group chat (Wo_CreateGChat returned: ' . var_export($id, true) . ')';
+            log_debug("ERROR: Wo_CreateGChat failed - returned: " . var_export($id, true), $log_file);
         }
     }
 
-    if ($_POST['type'] == 'edit') {
-        if (empty($_POST['id']) || !is_numeric($_POST['id']) || $_POST['id'] < 1) {
-            $error_code    = 7;
-            $error_message = 'id must be numeric and greater than 0';
-        }
-        if (empty($_POST['group_name']) && empty($_FILES["avatar"])) {
-            $error_code      = 9;
-            $error_message   = 'group_name and image can not be empty';
-        }
-        if (!empty($_POST['group_name']) && (strlen($_POST['group_name']) < 4 || strlen($_POST['group_name']) > 25) ) {
-            $error_code      = 5;
-            $error_message   = 'group_name must be between 4 and 25 character';
-        }
-        if (!empty($_FILES["avatar"]) && isset($_FILES["avatar"])) {
-            if (file_exists($_FILES["avatar"]["tmp_name"])) {
-                $image = getimagesize($_FILES["avatar"]["tmp_name"]);
-                if (!in_array($image[2], array(
-                    IMAGETYPE_GIF,
-                    IMAGETYPE_JPEG,
-                    IMAGETYPE_PNG,
-                    IMAGETYPE_BMP
-                ))) {
-                    $error_code    = 6;
-                    $error_message = 'Group avatar must be an image';
-                }
-            }
-        }
-
-        if (empty($error_code)) {
-            $group_id = $id = Wo_Secure($_POST['id']);
-            $group_tab = Wo_GroupTabData($group_id);
-            if ($group_tab && is_array($group_tab)) {
-                $update_data = array();
-                if (!empty($_POST['group_name'])) {
-                    $update_data['group_name']    = Wo_Secure($_POST['group_name']);
-                }
-                if (isset($_FILES["avatar"]["tmp_name"])) {
-                    $fileInfo      = array(
-                        'file' => $_FILES["avatar"]["tmp_name"],
-                        'name' => $_FILES['avatar']['name'],
-                        'size' => $_FILES["avatar"]["size"],
-                        'type' => $_FILES["avatar"]["type"],
-                        'types' => 'jpg,png,bmp,gif,jpeg',
-                        'compress' => false,
-                        'crop' => array(
-                            'width' => 70,
-                            'height' => 70
-                        )
-                    );
-                    $media         = Wo_ShareFile($fileInfo);
-                    $mediaFilename = $media['filename'];
-                    $update_data['avatar']    = $mediaFilename;
-                    
-                }
-                if (!empty($update_data)) {
-                    @Wo_UpdateGChat($id, $update_data);
-                    $group_data = Wo_GetChatGroupData($id);
-                    foreach ($group_data as $key_g => $group) {
-                        foreach ($non_allowed as $key => $value) {
-                            unset($group_data[$key_g]['user_data'][$value]);
-                        }
-                        foreach ($group_data[$key_g]['parts'] as $key1 => $part) {
-                            foreach ($non_allowed as $key => $value) {
-                                unset($group_data[$key_g]['parts'][$key1][$value]);
-                            }
-                        }
-                    }
-                    $response_data = array(
-                        'api_status' => 200,
-                        'data' => $group_data
-                    );
-                }
-            }
-            else{
-                $error_code    = 8;
-                $error_message = 'group not found or removed';
-            }
-        }
-    }
+    log_debug("=== CREATE GROUP CHAT REQUEST FINISHED ===\n", $log_file);
+}
 
     if ($_POST['type'] == 'leave') {
         if (empty($_POST['id']) || !is_numeric($_POST['id']) || $_POST['id'] < 1) {
